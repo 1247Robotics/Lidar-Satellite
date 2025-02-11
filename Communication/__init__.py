@@ -5,6 +5,7 @@ import json
 import zlib
 from queue import Queue
 from cachetools import TTLCache
+import threading
 
 DISCOVERY_PORT = 5556
 OPERATING_PORT = 5557
@@ -26,6 +27,8 @@ class Communication:
   outboundCache = TTLCache(maxsize=256, ttl=16)
   awaitingResend = TTLCache(maxsize=256, ttl=16)
 
+  messageQueue = Queue()
+
   def __init__(self):
     print("Starting Communication")
     print("Creating socket")
@@ -42,6 +45,18 @@ class Communication:
     print("Connecting to C2")
     self.connect_to_c2()
     print("Connected to C2")
+
+    print("Starting inbound loop")
+    threading.Thread(target=self.inbound_loop).start()
+    print("Started inbound loop")
+
+    print("Starting outbound loop")
+    threading.Thread(target=self.outbound_loop).start()
+    print("Started outbound loop")
+
+    print("Starting processing loop")
+    threading.Thread(target=self.processing_loop).start()
+    print("Started processing loop")
   
   def create_socket(self):
     self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -68,10 +83,15 @@ class Communication:
   def connect_to_c2(self):
     self.sock.connect((self.c2_ip, OPERATING_PORT))
 
-  def intake_inbound_loop(self):
+  def inbound_loop(self):
     while True:
       data = self.sock.recv(4196)
       self.inboundQueue.put(data)
+
+  def outbound_loop(self):
+    while True:
+      payload = self.outboundQueue.get()
+      self.send_single_payload(payload)
 
   def send_single_payload(self, payload):
     message_id = random_id()
@@ -85,14 +105,22 @@ class Communication:
     }
     data = json.dumps(data)
 
-    self.outboundCache[message_id] = data
+    self.outboundCache[message_id] = payload
 
     self.sock.send(data.encode())
 
-  def send_one_from_queue(self):
-    if not self.outboundQueue.empty():
-      payload = self.outboundQueue.get()
-      self.send_single_payload(payload)
+  def resend_id(self, message_id):
+    if message_id in self.outboundCache:
+      self.send_message(self.outboundCache[message_id])
+    else:
+      print("Message ID not in cache")
+
+  def request_resend(self, message_id):
+    self.send_message({
+      "type": "comms",
+      "command": "resend",
+      "message_id": message_id
+    })
 
   def decode_data(self, data):
     data = data.decode()
@@ -110,6 +138,42 @@ class Communication:
       malformed = True
 
     return (message_id, payload, malformed)
+  
+  def send_message(self, payload):
+    self.outboundQueue.put(payload)
 
-  def handleSingleIntake(self, data):
-    message_id, payload, malformed = self.decode_data(data)
+  def is_comms_command(self, payload):
+    return payload["type"] == "comms"
+  
+  def handle_comms_command(self, payload):
+    if payload["command"] == "resend":
+      self.resend_id(payload["message_id"])
+
+  def processing_loop(self):
+    while True:
+      data = self.inboundQueue.get()
+      message_id, payload, malformed = self.decode_data(data)
+
+      if malformed:
+        self.request_resend(message_id)        
+        continue
+
+      if self.is_comms_command(payload):
+        self.handle_comms_command(payload)
+        continue
+
+      self.messageQueue.put(payload)
+
+  '''
+  Get a message from the message queue
+  Returns: A message from the message queue
+  '''
+  def get(self, block=True, timeout: float | None = None):
+    return self.messageQueue.get(block, timeout)
+  
+  '''
+  Get a message from the message queue without blocking
+  Returns: A message from the message queue or None if the queue is empty
+  '''
+  def get_nowait(self):
+    return self.messageQueue.get_nowait()
