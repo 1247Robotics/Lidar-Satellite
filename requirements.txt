@@ -1,0 +1,6 @@
+cachetools==5.5.1
+future==1.0.0
+iso8601==2.1.0
+numpy==2.2.2
+PyYAML==6.0.2
+serial==0.0.97
